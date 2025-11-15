@@ -1,0 +1,39 @@
+{
+    "name": "efficientdet-pytorch",
+    "build": {
+      "dockerfile": "Dockerfile",
+      "context": ".",
+      "args": {
+        "USER_NAME": "sgsuh"
+      }
+    },
+    "containerEnv": {
+      "DISPLAY": "${localEnv:DISPLAY}",
+      "XAUTHORITY": "${localEnv:XAUTHORITY}"
+    },
+    "mounts": [
+      "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+      "source=/dev,target=/dev,type=bind,consistency=cached"
+    ],
+    "capAdd": [
+      "SYS_PTRACE"
+    ],
+    "privileged": true,
+    "securityOpt": [
+      "seccomp=unconfined"
+    ],
+    "runArgs": [
+      "--pid=host",
+      "--ipc=host",
+      "--network=host",
+      "--runtime=nvidia",
+      "--gpus=all"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python"
+            ]
+        }
+    }
+  }
