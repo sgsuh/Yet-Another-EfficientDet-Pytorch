@@ -1,134 +1,134 @@
-# Author: Zylo117
-
 """
-Simple Inference Script of EfficientDet-Pytorch
+Create: 2021.09.23
+Author: SG.SUH
+Python: 3.7
+PyTorch: 1.8
 """
-import time
-import torch
-from torch.backends import cudnn
-from matplotlib import colors
 
-from backbone import EfficientDetBackbone
-import cv2
+import argparse
+from efficientdet.dataset import parse_json
+import struct
 import numpy as np
+import glob
+import cv2
+import os
+import torch
 
-from efficientdet.utils import BBoxTransform, ClipBoxes
-from utils.utils import preprocess, invert_affine, postprocess, STANDARD_COLORS, standard_to_bgr, get_index_label, plot_one_box
+from efficientdet.infer_engine import InferEngine
 
-compound_coef = 0
-force_input_size = None  # set None to use default size
-img_path = 'test/img.png'
+obj_list = ['TRAFFIC_LIGHT', 'PEDESTRIAN', 'CAR', 'CYCLIST']
+obj_color = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255))
 
-# replace this part with your project's anchor config
-anchor_ratios = [(1.0, 1.0), (1.4, 0.7), (0.7, 1.4)]
-anchor_scales = [2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]
+def get_args():
+    parser = argparse.ArgumentParser('EfficientDet PyTorch')
 
-threshold = 0.2
-iou_threshold = 0.2
+    parser.add_argument('--data_fold', type = str, default = 'data')
+    parser.add_argument('--model_path', type = str, default = 'weight/effdet_d1.pth')
+    parser.add_argument('--valid_crop', action = 'store_true', default = True)
+    parser.add_argument('--resize', type = list, default = [455, 256])
+    parser.add_argument('--threshold', type = float, default = 0.4)
+    parser.add_argument('--iou_threshold', type = float, default = 0.3)
+    parser.add_argument('--tl_threshold', type = float, default = 0.3)
 
-use_cuda = True
-use_float16 = False
-cudnn.fastest = True
-cudnn.benchmark = True
+    args = parser.parse_args()
 
-obj_list = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
-            'fire hydrant', '', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep',
-            'cow', 'elephant', 'bear', 'zebra', 'giraffe', '', 'backpack', 'umbrella', '', '', 'handbag', 'tie',
-            'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove',
-            'skateboard', 'surfboard', 'tennis racket', 'bottle', '', 'wine glass', 'cup', 'fork', 'knife', 'spoon',
-            'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut',
-            'cake', 'chair', 'couch', 'potted plant', 'bed', '', 'dining table', '', '', 'toilet', '', 'tv',
-            'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-            'refrigerator', '', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
-            'toothbrush']
+    return args
 
+def crop(img, valid_crop):
+    idx = 12
+    step = 4
 
-color_list = standard_to_bgr(STANDARD_COLORS)
-# tf bilinear interpolation is different from any other's, just make do
-input_sizes = [512, 640, 768, 896, 1024, 1280, 1280, 1536, 1536]
-input_size = input_sizes[compound_coef] if force_input_size is None else force_input_size
-ori_imgs, framed_imgs, framed_metas = preprocess(img_path, max_size=input_size)
+    if valid_crop:
+        img_x = []
+        img_y = []
+        byte_data = img.tobytes()
 
-if use_cuda:
-    x = torch.stack([torch.from_numpy(fi).cuda() for fi in framed_imgs], 0)
-else:
-    x = torch.stack([torch.from_numpy(fi) for fi in framed_imgs], 0)
+        for _ in range(3):
+            img_x.append(float(struct.unpack('f', byte_data[idx:idx + step])[0]))
+            
+            idx += step
 
-x = x.to(torch.float32 if not use_float16 else torch.float16).permute(0, 3, 1, 2)
+            img_y.append(float(struct.unpack('f', byte_data[idx:idx + step])[0]))
 
-model = EfficientDetBackbone(compound_coef=compound_coef, num_classes=len(obj_list),
-                             ratios=anchor_ratios, scales=anchor_scales)
-model.load_state_dict(torch.load(f'weights/efficientdet-d{compound_coef}.pth', map_location='cpu'))
-model.requires_grad_(False)
-model.eval()
+            idx += step
 
-if use_cuda:
-    model = model.cuda()
-if use_float16:
-    model = model.half()
+        roi_x = int(img_x[0]) if not np.isnan(img_x[0]) else 0
+        roi_y = int(img_y[0]) if not np.isnan(img_y[0]) else 0
+        roi_width = int(img_x[1]) if not np.isnan(img_x[1]) else 0
+        roi_height = int(img_y[1]) if not np.isnan(img_y[1]) else 0
+        roi_offset_x = int(img_x[2]) if not np.isnan(img_x[2]) else 0
+        roi_offset_y = int(img_y[2]) if not np.isnan(img_y[2]) else 0
+    else:
+        roi_x = 480
+        roi_y = 0
+        roi_width = 960
+        roi_height = 540
+        roi_offset_x = 0
+        roi_offset_y = 0
+    
+    crop_x = roi_x + roi_offset_x
+    crop_y = roi_y + roi_offset_y
+    crop = img[crop_y:crop_y + roi_height, crop_x:crop_x + roi_width, :].copy()
 
-with torch.no_grad():
-    features, regression, classification, anchors = model(x)
+    if crop.shape[0] == 0:
+        crop_x = 480
+        crop_y = 0
+        roi_width = 960
+        roi_height = 540
+        crop = img[crop_y:crop_y + roi_height, crop_x:crop_x + roi_width, :].copy()
 
-    regressBoxes = BBoxTransform()
-    clipBoxes = ClipBoxes()
+    return crop, crop_x, crop_y, roi_width, roi_height
 
-    out = postprocess(x,
-                      anchors, regression, classification,
-                      regressBoxes, clipBoxes,
-                      threshold, iou_threshold)
+def test(opt):
+    file_list = glob.glob(opt.data_fold + '/*.png')
+    
+    save_fold = 'tl_bg'
 
-def display(preds, imgs, imshow=True, imwrite=False):
-    for i in range(len(imgs)):
-        if len(preds[i]['rois']) == 0:
-            continue
+    if not os.path.isdir(save_fold):
+        os.makedirs(save_fold)
 
-        imgs[i] = imgs[i].copy()
+    file_list.sort()
 
-        for j in range(len(preds[i]['rois'])):
-            x1, y1, x2, y2 = preds[i]['rois'][j].astype(np.int)
-            obj = obj_list[preds[i]['class_ids'][j]]
-            score = float(preds[i]['scores'][j])
-            plot_one_box(imgs[i], [x1, y1, x2, y2], label=obj,score=score,color=color_list[get_index_label(obj, obj_list)])
+    infer = InferEngine(opt.model_path, batch_size = 2)
 
+    for file_path in file_list:
+        img = cv2.imread(file_path)
+        save_img = img.copy()
+        file_name = os.path.basename(file_path)
+        crop_img, offset_x, offset_y, roi_width, roi_height = crop(img, opt.valid_crop)
+        im_size = [img.shape[1], img.shape[0]]
+        crop_size = [crop_img.shape[1], crop_img.shape[0]]
+        batch = [img, crop_img]
+        scale = [[im_size[0] / opt.resize[0], im_size[1] / opt.resize[1]], [crop_size[0] / opt.resize[0], crop_size[1] / opt.resize[1]]]
+        offset = [[0, 0], [offset_x, offset_y]]
+        input = infer.preprocess(batch, net_resize = True, dyn_std = True)
+        input = infer.to_tensor(input)
 
-        if imshow:
-            cv2.imshow('img', imgs[i])
-            cv2.waitKey(0)
+        with torch.no_grad():
+            features, regression, classification, anchors = infer.model(input)
 
-        if imwrite:
-            cv2.imwrite(f'test/img_inferred_d{compound_coef}_this_repo_{i}.jpg', imgs[i])
+        out = infer.postprocess(input, scale, offset, anchors, regression, classification, opt.threshold, opt.iou_threshold, opt.tl_threshold)
 
+        if len(out['box']) != 0:
+            for i in range(len(out['box'])):
+                x1 = int(out['box'][i][0])
+                y1 = int(out['box'][i][1])
+                x2 = int(out['box'][i][2])
+                y2 = int(out['box'][i][3])
 
-out = invert_affine(framed_metas, out)
-display(out, ori_imgs, imshow=False, imwrite=True)
+                cv2.rectangle(img, (x1, y1), (x2, y2), obj_color[out['class'][i]], 2)
 
-print('running speed test...')
-with torch.no_grad():
-    print('test1: model inferring and postprocessing')
-    print('inferring image for 10 times...')
-    t1 = time.time()
-    for _ in range(10):
-        _, regression, classification, anchors = model(x)
+                obj_str = obj_list[out['class'][i]]
+                score = float(out['score'][i])
 
-        out = postprocess(x,
-                          anchors, regression, classification,
-                          regressBoxes, clipBoxes,
-                          threshold, iou_threshold)
-        out = invert_affine(framed_metas, out)
+                cv2.putText(img, '{:.2f}'.format(score), (x1, y1 - 10), cv2.FONT_HERSHEY_DUPLEX, 0.5, obj_color[out['class'][i]], 1)
+                    
+        cv2.rectangle(img, (offset_x, offset_y), (offset_x + roi_width, offset_y + roi_height), (255, 255, 255), 2)
+        cv2.imshow(file_name, img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
-    t2 = time.time()
-    tact_time = (t2 - t1) / 10
-    print(f'{tact_time} seconds, {1 / tact_time} FPS, @batch_size 1')
+if __name__ == '__main__':
+    opt = get_args()
 
-    # uncomment this if you want a extreme fps test
-    # print('test2: model inferring only')
-    # print('inferring images for batch_size 32 for 10 times...')
-    # t1 = time.time()
-    # x = torch.cat([x] * 32, 0)
-    # for _ in range(10):
-    #     _, regression, classification, anchors = model(x)
-    #
-    # t2 = time.time()
-    # tact_time = (t2 - t1) / 10
-    # print(f'{tact_time} seconds, {32 / tact_time} FPS, @batch_size 32')
+    test(opt)
