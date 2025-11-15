@@ -54,6 +54,7 @@ input_sizes = [512, 640, 768, 896, 1024, 1280, 1280, 1536, 1536]
 
 def evaluate_coco(img_path, set_name, image_ids, coco, model, threshold=0.05):
     results = []
+    processed_image_ids = []
 
     regressBoxes = BBoxTransform()
     clipBoxes = ClipBoxes()
@@ -62,7 +63,7 @@ def evaluate_coco(img_path, set_name, image_ids, coco, model, threshold=0.05):
         image_info = coco.loadImgs(image_id)[0]
         image_path = img_path + image_info['file_name']
 
-        ori_imgs, framed_imgs, framed_metas = preprocess(image_path, max_size=input_sizes[compound_coef], mean=params['mean'], std=params['std'])
+        ori_imgs, framed_imgs, framed_metas = preprocess(image_path, max_size=input_sizes[compound_coef])
         x = torch.from_numpy(framed_imgs[0])
 
         if use_cuda:
@@ -81,6 +82,8 @@ def evaluate_coco(img_path, set_name, image_ids, coco, model, threshold=0.05):
                             anchors, regression, classification,
                             regressBoxes, clipBoxes,
                             threshold, nms_threshold)
+        
+        processed_image_ids.append(image_id)
         
         if not preds:
             continue
@@ -103,6 +106,9 @@ def evaluate_coco(img_path, set_name, image_ids, coco, model, threshold=0.05):
                 label = int(class_ids[roi_id])
                 box = rois[roi_id, :]
 
+                if score < threshold:
+                    break
+
                 image_result = {
                     'image_id': image_id,
                     'category_id': label + 1,
@@ -120,6 +126,8 @@ def evaluate_coco(img_path, set_name, image_ids, coco, model, threshold=0.05):
     if os.path.exists(filepath):
         os.remove(filepath)
     json.dump(results, open(filepath, 'w'), indent=4)
+
+    return processed_image_ids
 
 
 def _eval(coco_gt, image_ids, pred_json_path):
@@ -156,6 +164,6 @@ if __name__ == '__main__':
             if use_float16:
                 model.half()
 
-        evaluate_coco(VAL_IMGS, SET_NAME, image_ids, coco_gt, model)
+        image_ids = evaluate_coco(VAL_IMGS, SET_NAME, image_ids, coco_gt, model)
 
     _eval(coco_gt, image_ids, f'{SET_NAME}_bbox_results.json')
