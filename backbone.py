@@ -8,7 +8,12 @@ from efficientdet.utils import Anchors
 
 
 class EfficientDetBackbone(nn.Module):
-    def __init__(self, num_classes=80, compound_coef=0, load_weights=False, **kwargs):
+    def __init__(self, 
+                 num_classes=80, 
+                 compound_coef=0, 
+                 load_weights=False, 
+                 onnx_export=False, 
+                 **kwargs):
         super(EfficientDetBackbone, self).__init__()
         self.compound_coef = compound_coef
 
@@ -17,21 +22,21 @@ class EfficientDetBackbone(nn.Module):
         self.fpn_cell_repeats = [3, 4, 5, 6, 7, 7, 8, 8, 8]
         self.input_sizes = [512, 640, 768, 896, 1024, 1280, 1280, 1536, 1536]
         self.box_class_repeats = [3, 3, 3, 4, 4, 4, 5, 5, 5]
-        self.pyramid_levels = [5, 5, 5, 5, 5, 5, 5, 5, 6]
-        self.anchor_scale = [4., 4., 4., 4., 4., 4., 4., 5., 4.]
-        self.aspect_ratios = kwargs.get('ratios', [(1.0, 1.0), (1.4, 0.7), (0.7, 1.4)])
-        self.num_scales = len(kwargs.get('scales', [2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]))
+        self.anchor_scale = [4, 4, 4, 4, 4, 4, 4, 5, 4]
+        self.pyramid_levels = [5, 6, 5, 5, 5, 5, 5, 5, 6]
+        self.aspect_ratios = kwargs.get('ratios', [(1.0,4.0),(1.0,2.0),(1.0, 1.0),(2.0,1.0),(4.0, 1.0)])
+        self.num_scales = len(kwargs.get('scales', [0.25,0.5,2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]))
         conv_channel_coef = {
             # the channels of P3/P4/P5.
             0: [40, 112, 320],
-            1: [40, 112, 320],
+            1: [24, 40, 112, 320],
             2: [48, 120, 352],
             3: [48, 136, 384],
             4: [56, 160, 448],
             5: [64, 176, 512],
             6: [72, 200, 576],
             7: [72, 200, 576],
-            8: [80, 224, 640],
+            8: [48, 80, 224, 640],
         }
 
         num_anchors = len(self.aspect_ratios) * self.num_scales
@@ -41,21 +46,24 @@ class EfficientDetBackbone(nn.Module):
                     conv_channel_coef[compound_coef],
                     True if _ == 0 else False,
                     attention=True if compound_coef < 6 else False,
-                    use_p8=compound_coef > 7)
+                    onnx_export=onnx_export, use_p8=compound_coef > 7)
               for _ in range(self.fpn_cell_repeats[compound_coef])])
 
         self.num_classes = num_classes
         self.regressor = Regressor(in_channels=self.fpn_num_filters[self.compound_coef], num_anchors=num_anchors,
-                                   num_layers=self.box_class_repeats[self.compound_coef],
+                                   num_layers=self.box_class_repeats[self.compound_coef], onnx_export=onnx_export,
                                    pyramid_levels=self.pyramid_levels[self.compound_coef])
         self.classifier = Classifier(in_channels=self.fpn_num_filters[self.compound_coef], num_anchors=num_anchors,
                                      num_classes=num_classes,
-                                     num_layers=self.box_class_repeats[self.compound_coef],
+                                     num_layers=self.box_class_repeats[self.compound_coef], onnx_export=onnx_export,
                                      pyramid_levels=self.pyramid_levels[self.compound_coef])
 
-        self.anchors = Anchors(anchor_scale=self.anchor_scale[compound_coef],
-                               pyramid_levels=(torch.arange(self.pyramid_levels[self.compound_coef]) + 3).tolist(),
-                               **kwargs)
+        if not onnx_export:
+            self.anchors = Anchors(anchor_scale=self.anchor_scale[compound_coef],
+                                   pyramid_levels=(torch.arange(self.pyramid_levels[self.compound_coef]) + 2).tolist(),
+                                   **kwargs)
+
+        self.onnx_export = onnx_export
 
         self.backbone_net = EfficientNet(self.backbone_compound_coef[compound_coef], load_weights)
 
@@ -67,16 +75,21 @@ class EfficientDetBackbone(nn.Module):
     def forward(self, inputs):
         max_size = inputs.shape[-1]
 
-        _, p3, p4, p5 = self.backbone_net(inputs)
+        p2, p3, p4, p5 = self.backbone_net(inputs)
 
-        features = (p3, p4, p5)
+        features = (p2, p3, p4, p5)
         features = self.bifpn(features)
 
         regression = self.regressor(features)
         classification = self.classifier(features)
-        anchors = self.anchors(inputs, inputs.dtype)
 
-        return features, regression, classification, anchors
+        if not self.onnx_export:
+            anchors = self.anchors(inputs, inputs.dtype)
+
+        if self.onnx_export:
+            return regression, classification
+        else:
+            return features, regression, classification, anchors
 
     def init_backbone(self, path):
         state_dict = torch.load(path)
