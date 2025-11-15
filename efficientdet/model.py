@@ -1,3 +1,10 @@
+"""
+Modify: 2025.11.15
+Author: SG.SUH
+PyTorch: 1.8
+Python: 3.8.5
+"""
+
 import torch.nn as nn
 import torch
 from torchvision.ops.boxes import nms as nms_torch
@@ -78,6 +85,8 @@ class BiFPN(nn.Module):
         self.conv5_up = SeparableConvBlock(num_channels, onnx_export=onnx_export)
         self.conv4_up = SeparableConvBlock(num_channels, onnx_export=onnx_export)
         self.conv3_up = SeparableConvBlock(num_channels, onnx_export=onnx_export)
+        self.conv2_up = SeparableConvBlock(num_channels, onnx_export=onnx_export)
+        self.conv3_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
         self.conv4_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
         self.conv5_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
         self.conv6_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
@@ -87,17 +96,20 @@ class BiFPN(nn.Module):
             self.conv8_down = SeparableConvBlock(num_channels, onnx_export=onnx_export)
 
         # Feature scaling layers
-        self.p6_upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.p5_upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.p4_upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        self.p3_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.p6_upsample = nn.UpsamplingNearest2d(size=(4, 8), scale_factor=None)
+        self.p5_upsample = nn.Upsample(size=(8, 16), mode='nearest')
+        self.p4_upsample = nn.Upsample(size=(16, 32), mode='nearest')
+        self.p3_upsample = nn.Upsample(size=(32, 64), mode='nearest')
+        self.p2_upsample = nn.Upsample(size=(64, 128), mode='nearest')
 
+        self.p3_downsample = MaxPool2dStaticSamePadding(3, 2)
         self.p4_downsample = MaxPool2dStaticSamePadding(3, 2)
         self.p5_downsample = MaxPool2dStaticSamePadding(3, 2)
         self.p6_downsample = MaxPool2dStaticSamePadding(3, 2)
         self.p7_downsample = MaxPool2dStaticSamePadding(3, 2)
+
         if use_p8:
-            self.p7_upsample = nn.Upsample(scale_factor=2, mode='nearest')
+            # self.p7_upsample = nn.Upsample(scale_factor=2, mode='nearest')
             self.p8_downsample = MaxPool2dStaticSamePadding(3, 2)
 
         self.swish = MemoryEfficientSwish() if not onnx_export else Swish()
@@ -105,37 +117,46 @@ class BiFPN(nn.Module):
         self.first_time = first_time
         if self.first_time:
             self.p5_down_channel = nn.Sequential(
-                Conv2dStaticSamePadding(conv_channels[2], num_channels, 1),
+                Conv2dStaticSamePadding(conv_channels[3], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
             )
             self.p4_down_channel = nn.Sequential(
-                Conv2dStaticSamePadding(conv_channels[1], num_channels, 1),
+                Conv2dStaticSamePadding(conv_channels[2], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
             )
             self.p3_down_channel = nn.Sequential(
+                Conv2dStaticSamePadding(conv_channels[1], num_channels, 1),
+                nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
+            )
+            self.p2_down_channel = nn.Sequential(
                 Conv2dStaticSamePadding(conv_channels[0], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
             )
 
             self.p5_to_p6 = nn.Sequential(
-                Conv2dStaticSamePadding(conv_channels[2], num_channels, 1),
+                Conv2dStaticSamePadding(conv_channels[3], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
                 MaxPool2dStaticSamePadding(3, 2)
             )
             self.p6_to_p7 = nn.Sequential(
                 MaxPool2dStaticSamePadding(3, 2)
             )
+
             if use_p8:
                 self.p7_to_p8 = nn.Sequential(
                     MaxPool2dStaticSamePadding(3, 2)
                 )
 
-            self.p4_down_channel_2 = nn.Sequential(
+            self.p3_down_channel_2 = nn.Sequential(
                 Conv2dStaticSamePadding(conv_channels[1], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
             )
-            self.p5_down_channel_2 = nn.Sequential(
+            self.p4_down_channel_2 = nn.Sequential(
                 Conv2dStaticSamePadding(conv_channels[2], num_channels, 1),
+                nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
+            )
+            self.p5_down_channel_2 = nn.Sequential(
+                Conv2dStaticSamePadding(conv_channels[3], num_channels, 1),
                 nn.BatchNorm2d(num_channels, momentum=0.01, eps=1e-3),
             )
 
@@ -148,7 +169,11 @@ class BiFPN(nn.Module):
         self.p4_w1_relu = nn.ReLU()
         self.p3_w1 = nn.Parameter(torch.ones(2, dtype=torch.float32), requires_grad=True)
         self.p3_w1_relu = nn.ReLU()
+        self.p2_w1 = nn.Parameter(torch.ones(2, dtype=torch.float32), requires_grad=True)
+        self.p2_w1_relu = nn.ReLU()
 
+        self.p3_w2 = nn.Parameter(torch.ones(3, dtype=torch.float32), requires_grad=True)
+        self.p3_w2_relu = nn.ReLU()
         self.p4_w2 = nn.Parameter(torch.ones(3, dtype=torch.float32), requires_grad=True)
         self.p4_w2_relu = nn.ReLU()
         self.p5_w2 = nn.Parameter(torch.ones(3, dtype=torch.float32), requires_grad=True)
@@ -193,18 +218,19 @@ class BiFPN(nn.Module):
 
     def _forward_fast_attention(self, inputs):
         if self.first_time:
-            p3, p4, p5 = inputs
+            p2, p3, p4, p5 = inputs
 
             p6_in = self.p5_to_p6(p5)
             p7_in = self.p6_to_p7(p6_in)
 
+            p2_in = self.p2_down_channel(p2)
             p3_in = self.p3_down_channel(p3)
             p4_in = self.p4_down_channel(p4)
             p5_in = self.p5_down_channel(p5)
 
         else:
             # P3_0, P4_0, P5_0, P6_0 and P7_0
-            p3_in, p4_in, p5_in, p6_in, p7_in = inputs
+            p2_in, p3_in, p4_in, p5_in, p6_in, p7_in = inputs
 
         # P7_0 to P7_2
 
@@ -230,11 +256,21 @@ class BiFPN(nn.Module):
         p3_w1 = self.p3_w1_relu(self.p3_w1)
         weight = p3_w1 / (torch.sum(p3_w1, dim=0) + self.epsilon)
         # Connections for P3_0 and P4_1 to P3_2 respectively
-        p3_out = self.conv3_up(self.swish(weight[0] * p3_in + weight[1] * self.p3_upsample(p4_up)))
+        p3_up = self.conv3_up(self.swish(weight[0] * p3_in + weight[1] * self.p3_upsample(p4_up)))
+
+        p2_w1 = self.p2_w1_relu(self.p2_w1)
+        weight = p2_w1 / (torch.sum(p2_w1, dim=0) + self.epsilon)
+        p2_out = self.conv2_up(self.swish(weight[0] * p2_in + weight[1] * self.p2_upsample(p3_up)))
 
         if self.first_time:
+            p3_in = self.p3_down_channel_2(p3)
             p4_in = self.p4_down_channel_2(p4)
             p5_in = self.p5_down_channel_2(p5)
+
+        p3_w2 = self.p3_w2_relu(self.p3_w2)
+        weight = p3_w2 / (torch.sum(p3_w2, dim=0) + self.epsilon)
+        p3_out = self.conv3_down(
+            self.swish(weight[0] * p3_in + weight[1] * p3_up + weight[2] * self.p3_downsample(p2_out)))
 
         # Weights for P4_0, P4_1 and P3_2 to P4_2
         p4_w2 = self.p4_w2_relu(self.p4_w2)
@@ -263,17 +299,18 @@ class BiFPN(nn.Module):
         # Connections for P7_0 and P6_2 to P7_2
         p7_out = self.conv7_down(self.swish(weight[0] * p7_in + weight[1] * self.p7_downsample(p6_out)))
 
-        return p3_out, p4_out, p5_out, p6_out, p7_out
+        return p2_out, p3_out, p4_out, p5_out, p6_out, p7_out
 
     def _forward(self, inputs):
         if self.first_time:
-            p3, p4, p5 = inputs
+            p2, p3, p4, p5 = inputs
 
             p6_in = self.p5_to_p6(p5)
             p7_in = self.p6_to_p7(p6_in)
             if self.use_p8:
                 p8_in = self.p7_to_p8(p7_in)
 
+            p2_in = self.p2_down_channel(p2)
             p3_in = self.p3_down_channel(p3)
             p4_in = self.p4_down_channel(p4)
             p5_in = self.p5_down_channel(p5)
@@ -281,10 +318,10 @@ class BiFPN(nn.Module):
         else:
             if self.use_p8:
                 # P3_0, P4_0, P5_0, P6_0, P7_0 and P8_0
-                p3_in, p4_in, p5_in, p6_in, p7_in, p8_in = inputs
+                p2_in, p3_in, p4_in, p5_in, p6_in, p7_in, p8_in = inputs
             else:
                 # P3_0, P4_0, P5_0, P6_0 and P7_0
-                p3_in, p4_in, p5_in, p6_in, p7_in = inputs
+                p2_in, p3_in, p4_in, p5_in, p6_in, p7_in = inputs
 
         if self.use_p8:
             # P8_0 to P8_2
@@ -307,11 +344,16 @@ class BiFPN(nn.Module):
         p4_up = self.conv4_up(self.swish(p4_in + self.p4_upsample(p5_up)))
 
         # Connections for P3_0 and P4_1 to P3_2 respectively
-        p3_out = self.conv3_up(self.swish(p3_in + self.p3_upsample(p4_up)))
+        p3_up = self.conv3_up(self.swish(p3_in + self.p3_upsample(p4_up)))
+        p2_out = self.conv2_up(self.swish(p2_in + self.p2_upsample(p3_up)))
 
         if self.first_time:
+            p3_in = self.p3_down_channel_2(p3)
             p4_in = self.p4_down_channel_2(p4)
             p5_in = self.p5_down_channel_2(p5)
+
+        p3_out = self.conv3_down(
+            self.swish(p3_in + p4_up + self.p4_downsample(p2_out)))
 
         # Connections for P4_0, P4_1 and P3_2 to P4_2 respectively
         p4_out = self.conv4_down(
@@ -333,12 +375,12 @@ class BiFPN(nn.Module):
             # Connections for P8_0 and P7_2 to P8_2
             p8_out = self.conv8_down(self.swish(p8_in + self.p8_downsample(p7_out)))
 
-            return p3_out, p4_out, p5_out, p6_out, p7_out, p8_out
+            return p2_out, p3_out, p4_out, p5_out, p6_out, p7_out, p8_out
         else:
             # Connections for P7_0 and P6_2 to P7_2
             p7_out = self.conv7_down(self.swish(p7_in + self.p7_downsample(p6_out)))
 
-            return p3_out, p4_out, p5_out, p6_out, p7_out
+            return p2_out, p3_out, p4_out, p5_out, p6_out, p7_out
 
 
 class Regressor(nn.Module):
@@ -458,8 +500,5 @@ class EfficientNet(nn.Module):
 
 
 if __name__ == '__main__':
-    from tensorboardX import SummaryWriter
-
-
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)

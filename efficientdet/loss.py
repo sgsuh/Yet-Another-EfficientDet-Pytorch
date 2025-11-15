@@ -1,11 +1,36 @@
+"""
+Modify: 2021.09.09
+Author: SG.SUH
+Python: 3.7
+PyTorch: 1.8
+"""
+
 import torch
 import torch.nn as nn
 import cv2
 import numpy as np
 
-from efficientdet.utils import BBoxTransform, ClipBoxes
-from utils.utils import postprocess, invert_affine, display
+from efficientdet.utils import (
+    BBoxTransform, 
+    ClipBoxes
+)
 
+from utils.utils import (
+    postprocess, 
+    display
+)
+
+def calc_intersection(a, b):
+    area_a = torch.unsqueeze((a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1]), dim = 1)
+
+    iw = torch.min(torch.unsqueeze(a[:, 3], dim = 1), b[:, 2]) - torch.max(torch.unsqueeze(a[:, 1], 1), b[:, 0])
+    ih = torch.min(torch.unsqueeze(a[:, 2], dim = 1), b[:, 3]) - torch.max(torch.unsqueeze(a[:, 0], 1), b[:, 1])
+    iw = torch.clamp(iw, min = 0)
+    ih = torch.clamp(ih, min = 0)
+
+    intersection = iw * ih
+
+    return intersection / area_a
 
 def calc_iou(a, b):
     # a(anchor) [boxes, (y1, x1, y2, x2)]
@@ -35,21 +60,39 @@ class FocalLoss(nn.Module):
         classification_losses = []
         regression_losses = []
 
-        anchor = anchors[0, :, :]  # assuming all image sizes are the same, which it is
-        dtype = anchors.dtype
-
-        anchor_widths = anchor[:, 3] - anchor[:, 1]
-        anchor_heights = anchor[:, 2] - anchor[:, 0]
-        anchor_ctr_x = anchor[:, 1] + 0.5 * anchor_widths
-        anchor_ctr_y = anchor[:, 0] + 0.5 * anchor_heights
-
         for j in range(batch_size):
+            anchor = anchors[0, :, :]
+            dtype = anchors.dtype
 
             classification = classifications[j, :, :]
             regression = regressions[j, :, :]
 
             bbox_annotation = annotations[j]
             bbox_annotation = bbox_annotation[bbox_annotation[:, 4] != -1]
+            ignore_annotation = bbox_annotation[bbox_annotation[:, 4] == -1]
+
+            if ignore_annotation.shape[0] != 0:
+                IoU = calc_intersection(anchor[:, :], ignore_annotation[:, :4])
+                IoU_max, IoU_argmax = torch.max(IoU, dim = 1)
+                ignore_indices = torch.ge(IoU_max, 0.5)
+
+                if bbox_annotation.shape[0] != 0:
+                    IoU = calc_iou(anchor[:, :], bbox_annotation[:, :4])
+                    IoU_max, IoU_argmax = torch.max(IoU, dim = 1)
+                    object_indices = torch.lt(IoU_max, 0.4)
+                else:
+                    object_indices = ignore_indices
+
+                remove_indices = torch.bitwise_and(ignore_indices, object_indices)
+
+                classification = classification[remove_indices == False]
+                regression = regression[remove_indices == False]
+                anchor = anchor[remove_indices == False]
+
+            anchor_widths = anchor[:, 3] - anchor[:, 1]
+            anchor_heights = anchor[:, 2] - anchor[:, 0]
+            anchor_ctr_x = anchor[:, 1] + 0.5 * anchor_widths
+            anchor_ctr_y = anchor[:, 0] + 0.5 * anchor_heights
 
             classification = torch.clamp(classification, 1e-4, 1.0 - 1e-4)
             

@@ -1,3 +1,9 @@
+"""
+Modify: 2025.11.15
+Author: SG.SUH
+PyTorch: 1.8
+Python: 3.8.5
+"""
 import itertools
 import torch
 import torch.nn as nn
@@ -34,7 +40,29 @@ class BBoxTransform(nn.Module):
 
         return torch.stack([xmin, ymin, xmax, ymax], dim=2)
 
+class ClipBoxes_fix(nn.Module):
 
+    def __init__(self, width, height):
+        super(ClipBoxes_fix, self).__init__()
+        self.width = width
+        self.height = height
+
+    def forward(self, boxes):
+
+        boxes_split = torch.split(boxes, 1, dim=2)
+
+        clipbox =[]
+
+        clipbox.append(torch.clamp(boxes_split[0], min=0))
+        clipbox.append(torch.clamp(boxes_split[1], min=0))
+
+        clipbox.append(torch.clamp(boxes_split[2], max=self.width - 1))
+        clipbox.append(torch.clamp(boxes_split[3], max=self.height - 1))
+
+        boxes = torch.cat(clipbox, dim=2)
+
+        return boxes
+    
 class ClipBoxes(nn.Module):
 
     def __init__(self):
@@ -51,6 +79,51 @@ class ClipBoxes(nn.Module):
 
         return boxes
 
+def generate_anchors(image_size=(512,896), anchor_scale=4., pyramid_levels=None, **kwargs):
+
+    if pyramid_levels is None:
+        pyramid_levels = [2, 3, 4, 5, 6, 7]
+
+    strides = kwargs.get('strides', [2 ** x for x in pyramid_levels])
+    scales = np.array(kwargs.get('scales', [0.25, 0.5, 2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]))
+    ratios = kwargs.get('ratios', [(1.0, 4.0), (1.0, 2.0), (1.0, 1.0), (2.0, 1.0), (4.0, 1.0)])
+
+    print("++++++++++++generate_anchors+++++++++++++++")
+    print("image size", image_size)
+    print("level", pyramid_levels)
+    print("strides", strides)
+    print("scales", scales)
+    print("ratios", ratios)
+    print("--------------------------------------------")
+
+    boxes_all = []
+    for stride in strides:
+        boxes_level = []
+        for scale, ratio in itertools.product(scales, ratios):
+            base_anchor_size = anchor_scale * stride * scale
+            anchor_size_x_2 = base_anchor_size * ratio[0] / 2.0
+            anchor_size_y_2 = base_anchor_size * ratio[1] / 2.0
+
+            x = np.arange(stride / 2, image_size[1], stride)
+            y = np.arange(stride / 2, image_size[0], stride)
+            xv, yv = np.meshgrid(x, y)
+            xv = xv.reshape(-1)
+            yv = yv.reshape(-1)
+
+            # y1,x1,y2,x2
+            boxes = np.vstack((yv - anchor_size_y_2, xv - anchor_size_x_2,
+                               yv + anchor_size_y_2, xv + anchor_size_x_2))
+            boxes = np.swapaxes(boxes, 0, 1)
+            boxes_level.append(np.expand_dims(boxes, axis=1))
+        # concat anchors on the same level to the reshape NxAx4
+        boxes_level = np.concatenate(boxes_level, axis=1)
+        boxes_all.append(boxes_level.reshape([-1, 4]))
+
+    anchor_boxes = np.vstack(boxes_all)
+
+    anchor_boxes = np.expand_dims(anchor_boxes.astype(np.float32), axis=0)
+
+    return anchor_boxes
 
 class Anchors(nn.Module):
     """
@@ -62,13 +135,13 @@ class Anchors(nn.Module):
         self.anchor_scale = anchor_scale
 
         if pyramid_levels is None:
-            self.pyramid_levels = [3, 4, 5, 6, 7]
+            self.pyramid_levels = [2, 3, 4, 5, 6, 7]
         else:
             self.pyramid_levels = pyramid_levels
 
         self.strides = kwargs.get('strides', [2 ** x for x in self.pyramid_levels])
-        self.scales = np.array(kwargs.get('scales', [2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]))
-        self.ratios = kwargs.get('ratios', [(1.0, 1.0), (1.4, 0.7), (0.7, 1.4)])
+        self.scales = np.array(kwargs.get('scales', [0.25, 0.5, 2 ** 0, 2 ** (1.0 / 3.0), 2 ** (2.0 / 3.0)]))
+        self.ratios = kwargs.get('ratios', [(1.0,4.0),(1.0,2.0),(1.0, 1.0),(2.0,1.0),(4.0, 1.0)])
 
         self.last_anchors = {}
         self.last_shape = None
@@ -108,8 +181,6 @@ class Anchors(nn.Module):
         for stride in self.strides:
             boxes_level = []
             for scale, ratio in itertools.product(self.scales, self.ratios):
-                if image_shape[1] % stride != 0:
-                    raise ValueError('input size must be divided by the stride.')
                 base_anchor_size = self.anchor_scale * stride * scale
                 anchor_size_x_2 = base_anchor_size * ratio[0] / 2.0
                 anchor_size_y_2 = base_anchor_size * ratio[1] / 2.0
