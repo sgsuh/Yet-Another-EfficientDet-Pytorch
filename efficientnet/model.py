@@ -1,3 +1,10 @@
+"""
+Modify: 2025.11.15
+Author: SG.SUH
+PyTorch: 1.8
+Python: 3.8.5
+"""
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -13,6 +20,15 @@ from .utils import (
     Swish,
     MemoryEfficientSwish,
 )
+
+class MyAdaptiveAvgPool2d(nn.Module):
+    def __init__(self, sz=None):
+        super().__init__()
+
+    def forward(self, x):
+        inp_size = x.size()
+        return nn.functional.avg_pool2d(input=x,
+                  kernel_size= (inp_size[2], inp_size[3]))
 
 class MBConvBlock(nn.Module):
     """
@@ -84,7 +100,7 @@ class MBConvBlock(nn.Module):
 
         # Squeeze and Excitation
         if self.has_se:
-            x_squeezed = F.adaptive_avg_pool2d(x, 1)
+            x_squeezed = x.mean(dim=(2,3), keepdim=True)
             x_squeezed = self._se_reduce(x_squeezed)
             x_squeezed = self._swish(x_squeezed)
             x_squeezed = self._se_expand(x_squeezed)
@@ -167,11 +183,12 @@ class EfficientNet(nn.Module):
         self._avg_pooling = nn.AdaptiveAvgPool2d(1)
         self._dropout = nn.Dropout(self._global_params.dropout_rate)
         self._fc = nn.Linear(out_channels, self._global_params.num_classes)
-        self._swish = MemoryEfficientSwish()
+        self._swish = Swish()
 
     def set_swish(self, memory_efficient=True):
         """Sets swish function as memory efficient (for training) or standard (for export)"""
-        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
+        self._swish = Swish()
+
         for block in self._blocks:
             block.set_swish(memory_efficient)
 

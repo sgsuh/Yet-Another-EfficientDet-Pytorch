@@ -1,4 +1,11 @@
 """
+Modify: 2025.11.15
+Author: SG.SUH
+PyTorch: 1.8
+Python: 3.8.5
+"""
+
+"""
 This file contains helper functions for building the model and for loading model parameters.
 These helper functions are built to mirror those in the official TensorFlow implementation.
 """
@@ -107,6 +114,13 @@ class Conv2dDynamicSamePadding(nn.Conv2d):
     """ 2D Convolutions like TensorFlow, for a dynamic image size """
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True):
+        if isinstance(stride, int):
+            stride = (stride,stride)
+        elif isinstance(stride, list) and len(stride) == 1:
+            stride = stride * 2
+        elif isinstance(stride, tuple) and len(stride) == 1:
+            stride = (stride[0], stride[0])
+
         super().__init__(in_channels, out_channels, kernel_size, stride, 0, dilation, groups, bias)
         self.stride = self.stride if len(self.stride) == 2 else [self.stride[0]] * 2
 
